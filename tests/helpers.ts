@@ -131,6 +131,8 @@ export class MockBackend {
         u.password_hash = d.password_hash;
         return this.send(res, 204);
       }
+      case "app.ping":
+        return this.send(res, 200, { ok: true });
       case "email.send": {
         this.emails.push(d as unknown as SentEmail);
         return this.send(res, 202, { queued: true });

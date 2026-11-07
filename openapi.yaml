@@ -7,7 +7,8 @@ info:
     we handle Argon2id password hashing/verification, 15-minute JWT access tokens, rotating
     refresh tokens with reuse detection, sessions, logout and brute-force protection.
 
-    Every /auth request requires your application credentials in the `X-App-Id` and
+    Start by creating your application with `POST /api/v1/apps` (self-service, authenticated by your
+    RapidAPI subscription). Every /auth request then requires your application credentials in the `X-App-Id` and
     `X-App-Secret` headers (server-to-server only). Your backend must implement the
     integration contract (user.create / user.lookup / user.get) described in the documentation.
     Plaintext passwords are never sent to your backend.
@@ -22,6 +23,8 @@ tags:
   - name: Authentication
   - name: Tokens
   - name: Email (optional)
+  - name: Applications
+    description: Self-service management of your applications (authenticated by your RapidAPI subscription).
   - name: System
 paths:
   /api/v1/auth/register:
@@ -365,6 +368,158 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "501": { $ref: "#/components/responses/NotConfigured" }
         "502": { $ref: "#/components/responses/IntegrationError" }
+  /api/v1/apps:
+    post:
+      tags: [Applications]
+      operationId: createApp
+      summary: Create an application (self-service)
+      description: |
+        Creates an isolated authentication namespace bound to your RapidAPI account. No app credentials are needed:
+        your RapidAPI subscription identifies you. `app_secret` and `integration_signing_secret` are returned ONCE.
+        URLs must be https, resolve to public IP addresses and must not point to this API.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AppCreate" }
+            example: { name: Acme, backend_url: "https://api.acme.com/auth-hook", email_webhook_url: "https://api.acme.com/auth-email" }
+      responses:
+        "201":
+          description: Application created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SuccessEnvelope" }
+              example:
+                success: true
+                data:
+                  app:
+                    app_id: app_6c1f0d2b9e8a7c6d5e4f3a2b
+                    name: Acme
+                    backend_url: "https://api.acme.com/auth-hook"
+                    email_webhook_url: "https://api.acme.com/auth-email"
+                    is_active: true
+                    integration_secret_version: 1
+                    created_at: "2026-11-07T19:46:27.611Z"
+                    updated_at: "2026-11-07T19:46:27.611Z"
+                  credentials:
+                    app_secret: sk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+                    integration_signing_secret: whsec_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+                    note: Store these secrets now. They are shown only once; use the rotate endpoints to replace them.
+                error: null
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: APP_LIMIT_REACHED or PROXY_AUTH_FAILED
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+              example: { success: false, data: null, error: { code: APP_LIMIT_REACHED, message: You can create at most 5 applications. } }
+        "429": { $ref: "#/components/responses/RateLimited" }
+    get:
+      tags: [Applications]
+      operationId: listApps
+      summary: List your applications
+      responses:
+        "200":
+          description: Your applications (secrets are never returned)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SuccessEnvelope" }
+              example: { success: true, data: { apps: [{ app_id: app_6c1f0d2b9e8a7c6d5e4f3a2b, name: Acme, backend_url: "https://api.acme.com/auth-hook", email_webhook_url: null, is_active: true, integration_secret_version: 1, created_at: "2026-11-07T19:46:27.611Z", updated_at: "2026-11-07T19:46:27.611Z" }], limit: 5 }, error: null }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v1/apps/{app_id}:
+    parameters:
+      - $ref: "#/components/parameters/AppIdPath"
+    get:
+      tags: [Applications]
+      operationId: getApp
+      summary: Get one of your applications
+      responses:
+        "200":
+          description: Application
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SuccessEnvelope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Applications]
+      operationId: updateApp
+      summary: Update an application
+      description: Send any of the fields. `email_webhook_url = null` disables the optional email features.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AppUpdate" }
+            example: { backend_url: "https://api.acme.com/v2/auth-hook" }
+      responses:
+        "200":
+          description: Updated application
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SuccessEnvelope" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Applications]
+      operationId: deleteApp
+      summary: Delete an application and all of its sessions
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SuccessEnvelope" }
+              example: { success: true, data: { deleted: true, app_id: app_6c1f0d2b9e8a7c6d5e4f3a2b }, error: null }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/apps/{app_id}/rotate-secret:
+    parameters:
+      - $ref: "#/components/parameters/AppIdPath"
+    post:
+      tags: [Applications]
+      operationId: rotateAppSecret
+      summary: Issue a new app secret (the old one stops working immediately)
+      responses:
+        "200":
+          description: New secret (shown once)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SuccessEnvelope" }
+              example: { success: true, data: { app_id: app_6c1f0d2b9e8a7c6d5e4f3a2b, app_secret: sk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx }, error: null }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/apps/{app_id}/rotate-integration-secret:
+    parameters:
+      - $ref: "#/components/parameters/AppIdPath"
+    post:
+      tags: [Applications]
+      operationId: rotateIntegrationSecret
+      summary: Issue a new integration signing secret
+      responses:
+        "200":
+          description: New signing secret (shown once)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SuccessEnvelope" }
+              example: { success: true, data: { app_id: app_6c1f0d2b9e8a7c6d5e4f3a2b, integration_signing_secret: whsec_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx, integration_secret_version: 2 }, error: null }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/apps/{app_id}/test-backend:
+    parameters:
+      - $ref: "#/components/parameters/AppIdPath"
+    post:
+      tags: [Applications]
+      operationId: testBackend
+      summary: Test connectivity and signature verification of your endpoints
+      description: Sends a signed `app.ping` to your backend URL (and email webhook URL if set). Your endpoint must return 2xx.
+      responses:
+        "200":
+          description: Test result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SuccessEnvelope" }
+              example: { success: true, data: { ok: true, backend: { ok: true, status: 200, latency_ms: 42, error: null }, email_webhook: null }, error: null }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
   /api/v1/health:
     get:
       tags: [System]
@@ -413,7 +568,28 @@ components:
       required: true
       description: "`Bearer <access_token>`"
       schema: { type: string, example: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9... }
+    AppIdPath:
+      name: app_id
+      in: path
+      required: true
+      schema: { type: string, pattern: "^app_[a-f0-9]{24}$", example: app_6c1f0d2b9e8a7c6d5e4f3a2b }
   schemas:
+    AppCreate:
+      type: object
+      additionalProperties: false
+      required: [name, backend_url]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 100 }
+        backend_url: { type: string, format: uri, maxLength: 2048, description: HTTPS endpoint implementing the integration contract }
+        email_webhook_url: { type: string, format: uri, maxLength: 2048, nullable: true, description: Optional email delivery webhook }
+    AppUpdate:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        name: { type: string, minLength: 1, maxLength: 100 }
+        backend_url: { type: string, format: uri, maxLength: 2048 }
+        email_webhook_url: { type: string, format: uri, maxLength: 2048, nullable: true }
     Credentials:
       type: object
       additionalProperties: false
@@ -491,6 +667,9 @@ components:
                 - REFRESH_TOKEN_EXPIRED
                 - REFRESH_TOKEN_REUSED
                 - INVALID_ONE_TIME_TOKEN
+                - INVALID_INTEGRATION_URL
+                - MISSING_DEVELOPER_IDENTITY
+                - APP_LIMIT_REACHED
                 - FEATURE_NOT_CONFIGURED
                 - RATE_LIMITED
                 - NOT_FOUND
@@ -572,6 +751,12 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    NotFound:
+      description: Unknown resource, or an application that is not yours
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          example: { success: false, data: null, error: { code: NOT_FOUND, message: The requested resource does not exist. } }
     Unavailable:
       description: Database or rate limiter unavailable
       content:

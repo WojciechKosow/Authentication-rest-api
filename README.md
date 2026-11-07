@@ -24,6 +24,7 @@ Base URL (RapidAPI): `https://<your-api>.p.rapidapi.com` · Direct origin (Railw
 7. [Error codes](#7-error-codes)
 8. [Developer backend integration contract](#8-developer-backend-integration-contract)
 9. [Optional email flows](#9-optional-email-flows)
+9a. [Self-service application management](#9a-self-service-application-management)
 10. [Example integration flow](#10-example-integration-flow)
 11. [Security considerations](#11-security-considerations)
 12. [Operator guide: local setup](#12-operator-guide-local-setup)
@@ -99,14 +100,28 @@ examples/developer-backend/server.mjs   Reference implementation of the integrat
 
 ## 3. Quick start for API consumers
 
-1. Subscribe to the API on RapidAPI.
-2. Request an application (see [§15](#15-provisioning-applications)). You receive:
+Fully self-service, no contact with us needed:
+
+1. Subscribe to the API on RapidAPI (any plan).
+2. Create your application with **`POST /api/v1/apps`** (see [§9a](#9a-self-service-application-management)):
+   ```bash
+   curl -X POST https://<your-api>.p.rapidapi.com/api/v1/apps \
+     -H "Content-Type: application/json" \
+     -H "X-RapidAPI-Key: <your RapidAPI key>" \
+     -H "X-RapidAPI-Host: <your-api>.p.rapidapi.com" \
+     -d '{"name":"Acme","backend_url":"https://api.acme.com/auth-hook"}'
+   ```
+   You receive (**once**):
    - `app_id` (e.g. `app_6c1f…`) → header `X-App-Id`
    - `app_secret` (e.g. `sk_…`) → header `X-App-Secret` — **server-side only**
    - `integration_signing_secret` (`whsec_…`) → used by your backend to verify our calls
-3. Implement the [integration contract](#8-developer-backend-integration-contract) at an HTTPS URL
+3. Implement the [integration contract](#8-developer-backend-integration-contract) at that HTTPS URL
    (start from `examples/developer-backend/server.mjs`).
-4. Call `POST /api/v1/auth/register` and `POST /api/v1/auth/login` from your backend.
+4. Check the connection: `POST /api/v1/apps/{app_id}/test-backend` must return `"ok": true`.
+5. Call `POST /api/v1/auth/register` and `POST /api/v1/auth/login` from your backend.
+
+The application is bound to your RapidAPI account: its credentials only work with requests
+made through **your** RapidAPI subscription.
 
 ```bash
 curl -X POST https://<your-api>.p.rapidapi.com/api/v1/auth/login \
@@ -173,6 +188,17 @@ header — include it when reporting problems. `429` responses carry `Retry-Afte
 | POST | `/api/v1/auth/password/reset/request` | *(optional)* Send password reset via your webhook |
 | POST | `/api/v1/auth/password/reset/confirm` | *(optional)* Set a new password with a reset token |
 | GET | `/api/v1/health` | Health check (no auth) |
+| POST | `/api/v1/apps` | Create an application (self-service) |
+| GET | `/api/v1/apps` | List your applications |
+| GET | `/api/v1/apps/{app_id}` | Get one application |
+| PATCH | `/api/v1/apps/{app_id}` | Update name / backend URL / email webhook URL |
+| DELETE | `/api/v1/apps/{app_id}` | Delete an application and all its sessions |
+| POST | `/api/v1/apps/{app_id}/rotate-secret` | Issue a new `app_secret` (old one stops working) |
+| POST | `/api/v1/apps/{app_id}/rotate-integration-secret` | Issue a new `integration_signing_secret` |
+| POST | `/api/v1/apps/{app_id}/test-backend` | Send a signed `app.ping` to your endpoints |
+
+`/api/v1/auth/*` endpoints need `X-App-Id` + `X-App-Secret`. `/api/v1/apps*` endpoints need only
+your RapidAPI subscription (no app credentials).
 
 ### Token bundle
 
@@ -314,6 +340,8 @@ No authentication, not behind the gateway check. `200` when PostgreSQL and the r
 | 400 | `VALIDATION_ERROR` | Body failed validation (see `details`) |
 | 400 | `INVALID_JSON` | Body is not valid JSON |
 | 400 | `INVALID_ONE_TIME_TOKEN` | Email/reset token invalid, expired or used |
+| 400 | `INVALID_INTEGRATION_URL` | Backend/email URL not allowed (see `details`) |
+| 401 | `MISSING_DEVELOPER_IDENTITY` | `/apps` called without a RapidAPI user |
 | 401 | `MISSING_APP_CREDENTIALS` | `X-App-Id` / `X-App-Secret` missing |
 | 401 | `INVALID_APP_CREDENTIALS` | Unknown app, wrong secret, or app disabled |
 | 401 | `INVALID_CREDENTIALS` | Wrong email or password |
@@ -326,7 +354,8 @@ No authentication, not behind the gateway check. `200` when PostgreSQL and the r
 | 401 | `REFRESH_TOKEN_REUSED` | Reuse detected, session revoked → log in again |
 | 403 | `PROXY_AUTH_FAILED` | Request did not come through RapidAPI |
 | 403 | `APP_ACCESS_DENIED` | App is bound to a different RapidAPI user |
-| 404 | `NOT_FOUND` | Unknown endpoint |
+| 403 | `APP_LIMIT_REACHED` | Maximum number of applications per developer reached |
+| 404 | `NOT_FOUND` | Unknown endpoint, or an application that is not yours |
 | 409 | `EMAIL_ALREADY_REGISTERED` | Your backend reported the email exists |
 | 413 | `PAYLOAD_TOO_LARGE` | Body > 16 KiB |
 | 415 | `UNSUPPORTED_MEDIA_TYPE` | Content-Type is not `application/json` |
@@ -428,6 +457,11 @@ look them up case-insensitively.
 
 `200 { "user_id": "user_42", "email": "alice@example.com", "email_verified": true }` or `404`.
 
+#### `app.ping` (required for `test-backend`)
+
+`data: {}` → any `2xx` after verifying the signature. Sent only when you call
+`POST /api/v1/apps/{app_id}/test-backend` (to both the backend URL and the email webhook URL).
+
 #### `user.mark_email_verified` (only with email features)
 
 `data: { "user_id": "user_42", "email": "alice@example.com" }` → `204`/`200`, or `404` if the user does not exist
@@ -477,6 +511,106 @@ Password reset is identical with `/password/reset/request` and
 Only the most recently issued token per user and purpose is valid. If your backend fails during
 confirmation, the token stays usable until it expires.
 
+## 9a. Self-service application management
+
+Developers create and manage their own applications — no manual provisioning.
+
+**How identity works.** RapidAPI authenticates the subscriber (`X-RapidAPI-Key`) and forwards the
+request with `X-RapidAPI-User` (the subscriber's username) and `X-RapidAPI-Proxy-Secret`. The API
+verifies the proxy secret, so `X-RapidAPI-User` can be trusted; requests that bypass RapidAPI are
+rejected (`403 PROXY_AUTH_FAILED`). Every application is **owned by and bound to** that RapidAPI
+user: only the owner can see or change it, and its `X-App-Id`/`X-App-Secret` only work on
+requests made through the owner's subscription (`403 APP_ACCESS_DENIED` otherwise).
+If the server has no `RAPIDAPI_PROXY_SECRET` configured, these endpoints are disabled.
+
+**Limits.** `MAX_APPS_PER_DEVELOPER` applications per RapidAPI user (default 5), 10 creations/hour,
+120 management calls/hour, 30 connection tests/hour.
+
+**URL rules** (`backend_url`, `email_webhook_url`): `https://` only, public domain name that resolves to
+public IP addresses only, no credentials, no fragment, not this API's own domain and not `rapidapi.com`.
+Violations return `400 INVALID_INTEGRATION_URL` with the reason in `details`.
+
+### POST /api/v1/apps
+
+```json
+{
+  "name": "Acme",
+  "backend_url": "https://api.acme.com/auth-hook",
+  "email_webhook_url": "https://api.acme.com/auth-email"
+}
+```
+
+`email_webhook_url` is optional. Response `201`:
+
+```json
+{
+  "success": true,
+  "data": {
+    "app": {
+      "app_id": "app_6c1f0d2b9e8a7c6d5e4f3a2b",
+      "name": "Acme",
+      "backend_url": "https://api.acme.com/auth-hook",
+      "email_webhook_url": "https://api.acme.com/auth-email",
+      "is_active": true,
+      "integration_secret_version": 1,
+      "created_at": "2026-11-07T19:46:27.611Z",
+      "updated_at": "2026-11-07T19:46:27.611Z"
+    },
+    "credentials": {
+      "app_secret": "sk_…",
+      "integration_signing_secret": "whsec_…",
+      "note": "Store these secrets now. They are shown only once; use the rotate endpoints to replace them."
+    }
+  },
+  "error": null
+}
+```
+
+### GET /api/v1/apps · GET /api/v1/apps/{app_id}
+
+Returns `{ "apps": [ …app… ], "limit": 5 }` / `{ "app": { … } }`. Secrets are never returned.
+Applications of other developers return `404`.
+
+### PATCH /api/v1/apps/{app_id}
+
+Any of `name`, `backend_url`, `email_webhook_url` (`null` disables the email features). → `{ "app": { … } }`
+
+### DELETE /api/v1/apps/{app_id}
+
+Deletes the application with all its sessions and tokens. → `{ "deleted": true, "app_id": "app_…" }`
+
+### POST /api/v1/apps/{app_id}/rotate-secret
+
+→ `{ "app_id": "app_…", "app_secret": "sk_…" }`. The old secret stops working **immediately**:
+deploy the new one to your backend right after rotating.
+
+### POST /api/v1/apps/{app_id}/rotate-integration-secret
+
+→ `{ "app_id": "app_…", "integration_signing_secret": "whsec_…", "integration_secret_version": 2 }`.
+From now on calls to your backend are signed with the new secret. During the switch, let your
+backend accept both the old and the new secret, then remove the old one.
+
+### POST /api/v1/apps/{app_id}/test-backend
+
+Sends a signed `app.ping` to your backend URL (and email webhook URL, if set):
+
+```json
+{
+  "success": true,
+  "data": {
+    "ok": false,
+    "backend": {
+      "ok": false,
+      "status": 401,
+      "latency_ms": 42,
+      "error": "Your endpoint rejected the request: check signature verification and the integration signing secret."
+    },
+    "email_webhook": null
+  },
+  "error": null
+}
+```
+
 ## 10. Example integration flow
 
 ```text
@@ -516,13 +650,17 @@ the cache duration is the maximum delay before a logout takes effect.
   Refresh tokens are 256-bit random, stored as SHA-256 hashes, rotated on every use, reuse revokes the family.
   Session state is checked on every validation, so logout is immediate.
 - **Application isolation**: per-app keys, `aud`, and `app_id` checks on every DB lookup.
-  Optional binding of an app to a RapidAPI user (`X-RapidAPI-User`).
+  Self-service apps are bound to their owner's RapidAPI user (`X-RapidAPI-User`, trusted only after
+  the proxy-secret check), so leaked app credentials are useless from another subscription.
+- **Self-service provisioning**: no anonymous registration; creation requires a RapidAPI subscription,
+  is limited per developer (serialized with a Postgres advisory lock) and rate-limited.
 - **Gateway**: `X-RapidAPI-Proxy-Secret` is verified (constant-time) on every API call in production.
   A RapidAPI key alone is not trusted.
 - **Integration calls**: HMAC-SHA256 signed with timestamps; HTTPS only; URLs validated at provisioning and
   at call time; DNS results checked at connect time (blocks private, loopback, link-local, CGNAT,
   metadata and reserved ranges, IPv4-mapped IPv6, DNS rebinding); redirects not followed; 5 s timeout;
-  64 KiB response cap; strict response validation. Integration URLs can only be set by the operator CLI.
+  64 KiB response cap; strict response validation. Integration URLs can only be set by the
+  authenticated app owner (through RapidAPI) or the operator CLI, and never point at this API itself.
 - **HTTP hardening**: 16 KiB body limit, `application/json` only, strict schemas (unknown fields rejected),
   `Cache-Control: no-store`, HSTS, `nosniff`, `X-Frame-Options: DENY`, CSP `default-src 'none'`,
   no `X-Powered-By`, strict CORS (off by default, no wildcard).
@@ -565,6 +703,7 @@ INTEGRATION_SIGNING_SECRET=whsec_... node examples/developer-backend/server.mjs
 | `ACCESS_TOKEN_TTL_SECONDS` | no | `900` | 60–3600 |
 | `REFRESH_TOKEN_TTL_DAYS` | no | `30` | 1–365 |
 | `INTEGRATION_TIMEOUT_MS` | no | `5000` | 500–15000 |
+| `MAX_APPS_PER_DEVELOPER` | no | `5` | Self-service applications per RapidAPI user (1–1000) |
 | `CORS_ALLOWED_ORIGINS` | no | empty | Comma-separated exact origins; `*` is rejected |
 | `LOG_LEVEL` | no | `info` | `debug`, `info`, `warn`, `error`, `silent` |
 | `INTEGRATION_ALLOW_PRIVATE_URLS` | no | `false` | **Dev/test only**: allow `http://` and private hosts. Refused in production. |
@@ -583,8 +722,12 @@ Housekeeping (expired/revoked rows older than N days): `npm run apps -- cleanup 
 
 ## 15. Provisioning applications
 
-There is **no public endpoint** to create applications. The operator runs the CLI with the
-production environment variables:
+Developers normally create applications themselves through `POST /api/v1/apps`
+([§9a](#9a-self-service-application-management)). There is **no anonymous endpoint**: creation
+requires a RapidAPI subscription.
+
+The operator CLI remains for support and administration (e.g. disabling an abusive app, creating
+apps for customers outside RapidAPI, cleanup). Run it with the production environment variables:
 
 ```bash
 npm run apps -- create --name "Acme" \
@@ -610,7 +753,8 @@ Output (secrets are shown **once**):
 
 Other commands: `list`, `show`, `update`, `rotate-secret`, `rotate-integration-secret`,
 `rotate-jwt-key`, `disable`, `enable`, `cleanup` (see `scripts/apps.ts`).
-Send secrets to the developer over a secure channel.
+`disable` is the operator's kill switch: developers cannot re-enable a disabled app themselves.
+Apps created with the CLI without `--rapidapi-user` are not visible through `/api/v1/apps`.
 
 On Railway: `railway ssh` into the service and run the command there, or run it locally with
 `railway run npm run apps -- …` (uses the service variables; requires the database to be reachable
@@ -654,7 +798,10 @@ variable and redeploy. Run one or more replicas; all state is in PostgreSQL/Redi
    our own rate limits protect against brute force.
 7. **Docs**: paste sections 3–10 of this README into the API's *About / Tutorials* tab,
    including the onboarding instructions for obtaining an `app_id` (see limitations).
-8. Test every endpoint from the RapidAPI playground, then set the API to **Public**.
+8. In the API description, point new users to `POST /api/v1/apps` as the first step
+   (Quick start, [§3](#3-quick-start-for-api-consumers)).
+9. Test every endpoint from the RapidAPI playground (start with `POST /api/v1/apps`), then set the
+   API to **Public**.
 
 ## 18. Testing
 
@@ -670,14 +817,17 @@ and lockout), token validation and claims, forged / `alg:none` / expired tokens,
 reuse and concurrent reuse detection, logout and logout-all, application isolation, RapidAPI proxy
 secret and user binding, invalid bodies (schema, JSON, content type, size), integration failures
 (5xx, timeout, invalid shape, HTML, non-Argon2 hash, redirects), email verification and password
-reset flows, SSRF rules, configuration validation, log redaction and the Redis store.
+reset flows, SSRF rules, configuration validation, log redaction, the Redis store, and self-service
+app management (gateway/identity checks, ownership isolation, per-developer limit incl. concurrent
+creation, URL rules, secret rotation, connection test, deletion cascade).
 
 Other checks: `npm run typecheck`, `npm run lint`, `npm run build`.
 
 ## 19. Known limitations
 
-- **Application onboarding is manual** (operator CLI) by design — there is no self-service
-  application registration. Publish an onboarding contact/form on RapidAPI.
+- Self-service management works only through RapidAPI (identity = RapidAPI user). Customers outside
+  RapidAPI are provisioned with the operator CLI.
+- Rotating `app_secret` has no grace period: the old secret stops working immediately.
 - Access tokens are HS256 with server-only keys, so consumers validate them via `/validate`
   (one network call). JWKS/RS256 offline validation is not implemented.
 - Registration reveals whether an email exists (`409`), as most sign-up flows do.

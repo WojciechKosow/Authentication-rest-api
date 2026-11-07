@@ -23,6 +23,13 @@ export interface RequestContext {
   requestId: string;
   /** Best-effort client IP, used only as a rate-limit key (always namespaced per app). */
   clientIp: string;
+  /** Dynamic route segments (e.g. { appId: "app_..." }). */
+  params: Record<string, string | string[] | undefined>;
+}
+
+/** Shape of the second argument Next.js passes to route handlers. */
+export interface RouteContextArg {
+  params: Promise<Record<string, string | string[] | undefined>>;
 }
 
 export function json(
@@ -120,7 +127,7 @@ function corsHeaders(request: Request): Record<string, string> {
   return {
     "Access-Control-Allow-Origin": origin,
     Vary: "Origin",
-    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization, X-App-Id, X-App-Secret, X-End-User-IP",
     "Access-Control-Max-Age": "600",
   };
@@ -147,7 +154,7 @@ type Handler = (request: Request, ctx: RequestContext) => Promise<Response>;
  */
 export function route(handler: Handler, options: { gateway?: boolean } = {}) {
   const requireGateway = options.gateway ?? true;
-  return async function wrapped(request: Request): Promise<Response> {
+  return async function wrapped(request: Request, routeContext?: RouteContextArg): Promise<Response> {
     const started = Date.now();
     const requestId = randomUUID();
     const path = new URL(request.url).pathname;
@@ -155,7 +162,8 @@ export function route(handler: Handler, options: { gateway?: boolean } = {}) {
     let errorCode: string | undefined;
     try {
       if (requireGateway) verifyGateway(request);
-      response = await handler(request, { requestId, clientIp: resolveClientIp(request) });
+      const params = (await routeContext?.params) ?? {};
+      response = await handler(request, { requestId, clientIp: resolveClientIp(request), params });
     } catch (err) {
       if (err instanceof ApiError) {
         errorCode = err.code;

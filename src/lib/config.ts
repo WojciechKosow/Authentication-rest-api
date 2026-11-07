@@ -37,6 +37,7 @@ const EnvSchema = z.object({
   CORS_ALLOWED_ORIGINS: z.string().optional(),
   INTEGRATION_TIMEOUT_MS: intFromEnv(5000, 500, 15000),
   INTEGRATION_ALLOW_PRIVATE_URLS: boolFromEnv,
+  MAX_APPS_PER_DEVELOPER: intFromEnv(5, 1, 1000),
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error", "silent"]).default("info"),
 });
 
@@ -55,6 +56,8 @@ export interface AppConfig {
   integrationTimeoutMs: number;
   /** DEV/TEST ONLY: allow http:// and private-network integration URLs. Rejected in production. */
   integrationAllowPrivateUrls: boolean;
+  /** Self-service limit: applications per RapidAPI user. */
+  maxAppsPerDeveloper: number;
   logLevel: "debug" | "info" | "warn" | "error" | "silent";
 }
 
@@ -123,6 +126,7 @@ export function parseConfig(env: Record<string, string | undefined>): AppConfig 
     corsAllowedOrigins,
     integrationTimeoutMs: e.INTEGRATION_TIMEOUT_MS,
     integrationAllowPrivateUrls: e.INTEGRATION_ALLOW_PRIVATE_URLS,
+    maxAppsPerDeveloper: e.MAX_APPS_PER_DEVELOPER,
     logLevel: e.LOG_LEVEL,
   };
 }

@@ -44,6 +44,8 @@ function send(res, status, body) {
 
 async function handleAuthHook(action, data) {
   switch (action) {
+    case "app.ping": // connectivity + signature check from "test-backend"
+      return [200, { ok: true }];
     case "user.create": {
       if (await db.findByEmail(data.email)) return [409, { error: "user_exists" }];
       const user = await db.create(data.email, data.password_hash); // store the Argon2id hash as-is
@@ -78,6 +80,7 @@ async function handleAuthHook(action, data) {
 }
 
 async function handleEmailHook(action, data) {
+  if (action === "app.ping") return [200, { ok: true }];
   if (action !== "email.send") return [400, { error: "unknown_action" }];
   // Send with Resend / SendGrid / SES ... Build the link in YOUR frontend, e.g.:
   const link =

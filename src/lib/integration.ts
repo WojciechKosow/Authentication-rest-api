@@ -240,3 +240,38 @@ export async function sendEmailWebhook(
   const res = await post(app, app.emailWebhookUrl, action, payload);
   if (![200, 201, 202, 204].includes(res.status)) throw invalid(app, action, res.status, "unexpected status");
 }
+
+export interface PingResult {
+  ok: boolean;
+  status: number | null;
+  latency_ms: number;
+  error: string | null;
+}
+
+/**
+ * app.ping => any 2xx. Used by the self-service "test backend" endpoint so developers can
+ * verify reachability and their signature verification before going live.
+ */
+export async function pingEndpoint(app: AppRecord, url: string): Promise<PingResult> {
+  const started = Date.now();
+  try {
+    const res = await post(app, url, "app.ping", {});
+    const ok = res.status >= 200 && res.status < 300;
+    let error: string | null = null;
+    if (res.status === 401 || res.status === 403) error = "Your endpoint rejected the request: check signature verification and the integration signing secret.";
+    else if (res.status >= 300 && res.status < 400) error = "Redirects are not followed: use the final URL.";
+    else if (!ok) error = `Your endpoint returned HTTP ${res.status}; app.ping must return 2xx.`;
+    return { ok, status: res.status, latency_ms: Date.now() - started, error };
+  } catch (err) {
+    const code = err instanceof ApiError ? err.code : "INTEGRATION_ERROR";
+    return {
+      ok: false,
+      status: null,
+      latency_ms: Date.now() - started,
+      error:
+        code === "INTEGRATION_TIMEOUT"
+          ? "Your endpoint did not respond in time."
+          : "Your endpoint could not be reached, is not allowed, or returned a non-JSON body.",
+    };
+  }
+}

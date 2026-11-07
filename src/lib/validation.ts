@@ -34,3 +34,21 @@ export const validateSchema = z.strictObject({
 export const emailRequestSchema = z.strictObject({ email: emailField });
 export const verifyEmailConfirmSchema = z.strictObject({ token: oneTimeTokenField });
 export const passwordResetConfirmSchema = z.strictObject({ token: oneTimeTokenField, new_password: passwordField });
+
+const appName = z.string({ error: "name is required" }).trim().min(1, "name is required").max(100, "name is too long");
+const integrationUrl = (field: string) =>
+  z.string({ error: `${field} is required` }).trim().min(1).max(2048, `${field} is too long`);
+
+export const appCreateSchema = z.strictObject({
+  name: appName,
+  backend_url: integrationUrl("backend_url"),
+  email_webhook_url: integrationUrl("email_webhook_url").nullable().optional(),
+});
+
+export const appUpdateSchema = z
+  .strictObject({
+    name: appName.optional(),
+    backend_url: integrationUrl("backend_url").optional(),
+    email_webhook_url: integrationUrl("email_webhook_url").nullable().optional(),
+  })
+  .refine((v) => Object.keys(v).length > 0, { message: "Provide at least one field to update" });

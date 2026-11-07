@@ -16,12 +16,11 @@
  * Requires the same environment variables as the server (DATABASE_URL, JWT_MASTER_SECRET,
  * INTEGRATION_MASTER_SECRET, ...).
  */
-import { lookup } from "node:dns/promises";
 import { parseArgs } from "node:util";
 import { APP_ID_PATTERN, generateAppId, generateAppSecret, hashAppSecret, integrationSigningSecret } from "@/lib/apps";
 import { getConfig } from "@/lib/config";
 import { disconnectDb, getDb } from "@/lib/db";
-import { assertSafeUrl, isPublicIp } from "@/lib/ssrf";
+import { validateIntegrationUrl } from "@/lib/ssrf";
 
 const { positionals, values } = parseArgs({
   allowPositionals: true,
@@ -43,19 +42,11 @@ function fail(message: string): never {
 }
 
 async function validateUrl(label: string, raw: string): Promise<string> {
-  const { integrationAllowPrivateUrls } = getConfig();
-  let url: URL;
   try {
-    url = assertSafeUrl(raw, integrationAllowPrivateUrls);
+    return await validateIntegrationUrl(raw, { allowPrivate: getConfig().integrationAllowPrivateUrls });
   } catch (err) {
     fail(`${label}: ${(err as Error).message}`);
   }
-  if (!integrationAllowPrivateUrls) {
-    const host = url.hostname.replace(/^\[|\]$/g, "");
-    const addresses = await lookup(host, { all: true }).catch(() => fail(`${label}: host ${host} does not resolve`));
-    if (addresses.some((a) => !isPublicIp(a.address))) fail(`${label}: host resolves to a private/reserved address`);
-  }
-  return url.toString();
 }
 
 function requireAppId(): string {

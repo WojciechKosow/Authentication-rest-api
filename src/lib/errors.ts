@@ -23,6 +23,12 @@ export const ERRORS = {
     status: 401,
     message: "The refresh token was already used. The session has been revoked for safety.",
   },
+  INVALID_INTEGRATION_URL: { status: 400, message: "The integration URL is not allowed." },
+  MISSING_DEVELOPER_IDENTITY: {
+    status: 401,
+    message: "Application management requires a RapidAPI subscription (X-RapidAPI-User).",
+  },
+  APP_LIMIT_REACHED: { status: 403, message: "You have reached the maximum number of applications." },
   INVALID_ONE_TIME_TOKEN: { status: 400, message: "The token is invalid, expired or already used." },
   FEATURE_NOT_CONFIGURED: { status: 501, message: "This feature is not configured for the application." },
   RATE_LIMITED: { status: 429, message: "Too many requests. Please try again later." },

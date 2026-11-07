@@ -1,4 +1,5 @@
 import { lookup as dnsLookup, type LookupAddress } from "node:dns";
+import { lookup as dnsLookupAsync } from "node:dns/promises";
 import { BlockList, isIP } from "node:net";
 
 /**
@@ -106,4 +107,32 @@ export function safeLookup(hostname: string, options: { all?: boolean } | number
     if (wantAll) return callback(null, addresses);
     return callback(null, addresses[0].address, addresses[0].family);
   });
+}
+
+/**
+ * Full validation for a developer-supplied integration URL (used at creation/update time):
+ * static checks, refusal of our own host, and DNS resolution to public addresses only.
+ * Connect-time checks (safeLookup) still apply on every call.
+ */
+export async function validateIntegrationUrl(
+  raw: string,
+  opts: { allowPrivate: boolean; ownHosts?: string[] },
+): Promise<string> {
+  const url = assertSafeUrl(raw, opts.allowPrivate);
+  const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (opts.ownHosts?.some((h) => h && (host === h || host.endsWith(`.${h}`)))) {
+    throw new UnsafeUrlError("URL must not point to this API");
+  }
+  if (!opts.allowPrivate && !isIP(host)) {
+    let addresses: { address: string }[];
+    try {
+      addresses = await dnsLookupAsync(host, { all: true, verbatim: true });
+    } catch {
+      throw new UnsafeUrlError(`host ${host} does not resolve`);
+    }
+    if (!addresses.length || addresses.some((a) => !isPublicIp(a.address))) {
+      throw new UnsafeUrlError("URL host resolves to a private or reserved address");
+    }
+  }
+  return url.toString();
 }

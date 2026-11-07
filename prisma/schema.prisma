@@ -12,7 +12,8 @@ datasource db {
 }
 
 /// A developer application = an isolated authentication namespace.
-/// Provisioned with `npm run apps -- create ...` (there is no public endpoint).
+/// Created self-service by RapidAPI subscribers (POST /api/v1/apps, bound to their RapidAPI user)
+/// or by the operator CLI (`npm run apps -- create ...`). There is no unauthenticated endpoint.
 model Application {
   /// Public application identifier, e.g. "app_3f9c1e...". Sent as X-App-Id.
   id                       String   @id
@@ -23,7 +24,7 @@ model Application {
   backendUrl               String   @map("backend_url")
   /// Optional developer endpoint that delivers emails (verification / password reset).
   emailWebhookUrl          String?  @map("email_webhook_url")
-  /// Optional binding to a RapidAPI user (X-RapidAPI-User). When set, other RapidAPI users cannot use this app.
+  /// Owner RapidAPI user (X-RapidAPI-User). When set, only this RapidAPI user can use and manage the app.
   rapidApiUser             String?  @map("rapidapi_user")
   /// Bumping this rotates the app's JWT signing key (invalidates all access tokens of the app).
   jwtKeyVersion            Int      @default(1) @map("jwt_key_version")
@@ -36,6 +37,7 @@ model Application {
   sessions      Session[]
   oneTimeTokens OneTimeToken[]
 
+  @@index([rapidApiUser])
   @@map("applications")
 }
 
