@@ -1,0 +1,579 @@
+openapi: 3.0.3
+info:
+  title: Authentication API
+  version: 1.0.0
+  description: |
+    Lightweight multi-tenant authentication API. You keep your users in your own database;
+    we handle Argon2id password hashing/verification, 15-minute JWT access tokens, rotating
+    refresh tokens with reuse detection, sessions, logout and brute-force protection.
+
+    Every /auth request requires your application credentials in the `X-App-Id` and
+    `X-App-Secret` headers (server-to-server only). Your backend must implement the
+    integration contract (user.create / user.lookup / user.get) described in the documentation.
+    Plaintext passwords are never sent to your backend.
+
+    All responses use the envelope `{ "success": boolean, "data": object|null, "error": object|null }`.
+  contact:
+    name: API support
+servers:
+  - url: https://auth.xyz.com
+    description: Origin (behind RapidAPI)
+tags:
+  - name: Authentication
+  - name: Tokens
+  - name: Email (optional)
+  - name: System
+paths:
+  /api/v1/auth/register:
+    post:
+      tags: [Authentication]
+      operationId: register
+      summary: Register a user and start a session
+      description: Hashes the password with Argon2id, asks your backend to create the user (`user.create`) and returns tokens.
+      parameters:
+        - $ref: "#/components/parameters/AppId"
+        - $ref: "#/components/parameters/AppSecret"
+        - $ref: "#/components/parameters/EndUserIp"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Credentials" }
+            example: { email: alice@example.com, password: correct horse battery staple }
+      responses:
+        "201":
+          description: User created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthSuccess" }
+              example:
+                success: true
+                data:
+                  user: { user_id: user_42, email: alice@example.com, email_verified: false }
+                  tokens:
+                    token_type: Bearer
+                    access_token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyXzQyIn0.sig
+                    access_token_expires_at: "2026-11-07T18:06:41.000Z"
+                    expires_in: 900
+                    refresh_token: rt_Q2x1c3RlcjQyX2V4YW1wbGVfcmVmcmVzaF90b2tlbg
+                    refresh_token_expires_at: "2026-12-07T17:51:41.172Z"
+                    session_id: 3bb8e5ba-df6c-411d-9dbb-dd1e71c512ad
+                error: null
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: Email already registered
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+              example: { success: false, data: null, error: { code: EMAIL_ALREADY_REGISTERED, message: An account with this email already exists. } }
+        "413": { $ref: "#/components/responses/TooLarge" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/IntegrationError" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+        "504": { $ref: "#/components/responses/IntegrationTimeout" }
+  /api/v1/auth/login:
+    post:
+      tags: [Authentication]
+      operationId: login
+      summary: Log in with email and password
+      description: Fetches the stored Argon2id hash from your backend (`user.lookup`), verifies the password and returns tokens. Errors are generic to prevent account enumeration.
+      parameters:
+        - $ref: "#/components/parameters/AppId"
+        - $ref: "#/components/parameters/AppSecret"
+        - $ref: "#/components/parameters/EndUserIp"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Credentials" }
+            example: { email: alice@example.com, password: correct horse battery staple }
+      responses:
+        "200":
+          description: Logged in
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthSuccess" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401":
+          description: Invalid credentials or application credentials
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+              example: { success: false, data: null, error: { code: INVALID_CREDENTIALS, message: Invalid email or password. } }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/IntegrationError" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+        "504": { $ref: "#/components/responses/IntegrationTimeout" }
+  /api/v1/auth/refresh:
+    post:
+      tags: [Tokens]
+      operationId: refresh
+      summary: Rotate the refresh token and get a new access token
+      description: Refresh tokens are single-use. Presenting an already-used token revokes the whole session (REFRESH_TOKEN_REUSED).
+      parameters:
+        - $ref: "#/components/parameters/AppId"
+        - $ref: "#/components/parameters/AppSecret"
+        - $ref: "#/components/parameters/EndUserIp"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [refresh_token]
+              properties:
+                refresh_token: { type: string, pattern: "^rt_[A-Za-z0-9_-]{43}$" }
+            example: { refresh_token: rt_Q2x1c3RlcjQyX2V4YW1wbGVfcmVmcmVzaF90b2tlbg }
+      responses:
+        "200":
+          description: New token bundle
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          tokens: { $ref: "#/components/schemas/TokenBundle" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401":
+          description: INVALID_REFRESH_TOKEN, REFRESH_TOKEN_EXPIRED, REFRESH_TOKEN_REUSED or SESSION_REVOKED
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+              example: { success: false, data: null, error: { code: REFRESH_TOKEN_REUSED, message: The refresh token was already used. The session has been revoked for safety. } }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /api/v1/auth/logout:
+    post:
+      tags: [Tokens]
+      operationId: logout
+      summary: Revoke the current session (or all sessions of the user)
+      description: Provide `refresh_token` and/or a Bearer access token. `all_sessions` requires a Bearer token.
+      parameters:
+        - $ref: "#/components/parameters/AppId"
+        - $ref: "#/components/parameters/AppSecret"
+        - $ref: "#/components/parameters/BearerToken"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                refresh_token: { type: string, pattern: "^rt_[A-Za-z0-9_-]{43}$" }
+                all_sessions: { type: boolean }
+            example: { refresh_token: rt_Q2x1c3RlcjQyX2V4YW1wbGVfcmVmcmVzaF90b2tlbg }
+      responses:
+        "200":
+          description: Logged out
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SuccessEnvelope" }
+              example: { success: true, data: { logged_out: true }, error: null }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v1/auth/me:
+    get:
+      tags: [Tokens]
+      operationId: me
+      summary: Get the current user and session
+      description: Validates the access token (signature, expiry, active session) and fetches fresh user data from your backend (`user.get`).
+      parameters:
+        - $ref: "#/components/parameters/AppId"
+        - $ref: "#/components/parameters/AppSecret"
+        - $ref: "#/components/parameters/BearerTokenRequired"
+      responses:
+        "200":
+          description: Current user
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SuccessEnvelope" }
+              example:
+                success: true
+                data:
+                  user: { user_id: user_42, email: alice@example.com, email_verified: true }
+                  session:
+                    session_id: 3bb8e5ba-df6c-411d-9dbb-dd1e71c512ad
+                    created_at: "2026-11-07T17:51:41.195Z"
+                    expires_at: "2026-12-07T17:51:41.172Z"
+                    access_token_expires_at: "2026-11-07T18:06:41.000Z"
+                error: null
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "502": { $ref: "#/components/responses/IntegrationError" }
+        "504": { $ref: "#/components/responses/IntegrationTimeout" }
+  /api/v1/auth/validate:
+    post:
+      tags: [Tokens]
+      operationId: validate
+      summary: Validate an access token
+      description: Verifies signature, issuer, audience (your app_id), expiry and that the session has not been revoked. Use `data.user_id` as the authenticated user.
+      parameters:
+        - $ref: "#/components/parameters/AppId"
+        - $ref: "#/components/parameters/AppSecret"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [access_token]
+              properties:
+                access_token: { type: string, maxLength: 4096 }
+            example: { access_token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyXzQyIn0.sig }
+      responses:
+        "200":
+          description: Token is valid
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SuccessEnvelope" }
+              example:
+                success: true
+                data:
+                  active: true
+                  user_id: user_42
+                  app_id: app_6c1f0d2b9e8a7c6d5e4f3a2b
+                  session_id: 3bb8e5ba-df6c-411d-9dbb-dd1e71c512ad
+                  issued_at: "2026-11-07T17:51:41.000Z"
+                  expires_at: "2026-11-07T18:06:41.000Z"
+                  session_expires_at: "2026-12-07T17:51:41.172Z"
+                error: null
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401":
+          description: INVALID_TOKEN, TOKEN_EXPIRED or SESSION_REVOKED
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+              example: { success: false, data: null, error: { code: TOKEN_EXPIRED, message: The access token has expired. } }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v1/auth/email/verify/request:
+    post:
+      tags: [Email (optional)]
+      operationId: requestEmailVerification
+      summary: Send an email verification token via your email webhook
+      description: Always returns 202 (does not reveal whether the email exists). Requires an email webhook configured for the application, otherwise 501.
+      parameters:
+        - $ref: "#/components/parameters/AppId"
+        - $ref: "#/components/parameters/AppSecret"
+        - $ref: "#/components/parameters/EndUserIp"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EmailOnly" }
+            example: { email: alice@example.com }
+      responses:
+        "202": { $ref: "#/components/responses/Accepted" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "501": { $ref: "#/components/responses/NotConfigured" }
+        "502": { $ref: "#/components/responses/IntegrationError" }
+  /api/v1/auth/email/verify/confirm:
+    post:
+      tags: [Email (optional)]
+      operationId: confirmEmailVerification
+      summary: Confirm an email verification token
+      parameters:
+        - $ref: "#/components/parameters/AppId"
+        - $ref: "#/components/parameters/AppSecret"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [token]
+              properties:
+                token: { type: string, pattern: "^ev_[A-Za-z0-9_-]{43}$" }
+      responses:
+        "200":
+          description: Email verified
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SuccessEnvelope" }
+              example: { success: true, data: { user_id: user_42, email: alice@example.com, email_verified: true }, error: null }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "501": { $ref: "#/components/responses/NotConfigured" }
+        "502": { $ref: "#/components/responses/IntegrationError" }
+  /api/v1/auth/password/reset/request:
+    post:
+      tags: [Email (optional)]
+      operationId: requestPasswordReset
+      summary: Send a password reset token via your email webhook
+      description: Always returns 202 (does not reveal whether the email exists). Token valid for 1 hour.
+      parameters:
+        - $ref: "#/components/parameters/AppId"
+        - $ref: "#/components/parameters/AppSecret"
+        - $ref: "#/components/parameters/EndUserIp"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EmailOnly" }
+            example: { email: alice@example.com }
+      responses:
+        "202": { $ref: "#/components/responses/Accepted" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "501": { $ref: "#/components/responses/NotConfigured" }
+        "502": { $ref: "#/components/responses/IntegrationError" }
+  /api/v1/auth/password/reset/confirm:
+    post:
+      tags: [Email (optional)]
+      operationId: confirmPasswordReset
+      summary: Set a new password using a reset token
+      description: Hashes the new password, updates it in your backend (`user.update_password`) and revokes all of the user's sessions.
+      parameters:
+        - $ref: "#/components/parameters/AppId"
+        - $ref: "#/components/parameters/AppSecret"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [token, new_password]
+              properties:
+                token: { type: string, pattern: "^pr_[A-Za-z0-9_-]{43}$" }
+                new_password: { type: string, minLength: 8, maxLength: 128 }
+      responses:
+        "200":
+          description: Password changed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SuccessEnvelope" }
+              example: { success: true, data: { password_reset: true, sessions_revoked: 2 }, error: null }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "501": { $ref: "#/components/responses/NotConfigured" }
+        "502": { $ref: "#/components/responses/IntegrationError" }
+  /api/v1/health:
+    get:
+      tags: [System]
+      operationId: health
+      summary: Health check
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SuccessEnvelope" }
+              example:
+                success: true
+                data: { status: ok, version: v1, checks: { database: ok, rate_limiter: ok, rate_limiter_store: redis } }
+                error: null
+        "503": { $ref: "#/components/responses/Unavailable" }
+components:
+  parameters:
+    AppId:
+      name: X-App-Id
+      in: header
+      required: true
+      description: Your application ID.
+      schema: { type: string, pattern: "^app_[a-f0-9]{24}$", example: app_6c1f0d2b9e8a7c6d5e4f3a2b }
+    AppSecret:
+      name: X-App-Secret
+      in: header
+      required: true
+      description: Your application secret. Server-side use only.
+      schema: { type: string, example: sk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx }
+    EndUserIp:
+      name: X-End-User-IP
+      in: header
+      required: false
+      description: IP address of your end user (used only for per-application rate limiting).
+      schema: { type: string, example: 203.0.113.7 }
+    BearerToken:
+      name: Authorization
+      in: header
+      required: false
+      description: "`Bearer <access_token>`"
+      schema: { type: string, example: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9... }
+    BearerTokenRequired:
+      name: Authorization
+      in: header
+      required: true
+      description: "`Bearer <access_token>`"
+      schema: { type: string, example: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9... }
+  schemas:
+    Credentials:
+      type: object
+      additionalProperties: false
+      required: [email, password]
+      properties:
+        email: { type: string, format: email, maxLength: 254 }
+        password: { type: string, minLength: 8, maxLength: 128 }
+    EmailOnly:
+      type: object
+      additionalProperties: false
+      required: [email]
+      properties:
+        email: { type: string, format: email, maxLength: 254 }
+    User:
+      type: object
+      properties:
+        user_id: { type: string }
+        email: { type: string, format: email }
+        email_verified: { type: boolean, nullable: true }
+    TokenBundle:
+      type: object
+      properties:
+        token_type: { type: string, enum: [Bearer] }
+        access_token: { type: string, description: "HS256 JWT. Claims: sub, app_id, session_id, iat, exp, iss, aud, jti" }
+        access_token_expires_at: { type: string, format: date-time }
+        expires_in: { type: integer, example: 900 }
+        refresh_token: { type: string, description: Single-use, rotated on every refresh }
+        refresh_token_expires_at: { type: string, format: date-time }
+        session_id: { type: string, format: uuid }
+    AuthSuccess:
+      type: object
+      properties:
+        success: { type: boolean, enum: [true] }
+        data:
+          type: object
+          properties:
+            user: { $ref: "#/components/schemas/User" }
+            tokens: { $ref: "#/components/schemas/TokenBundle" }
+        error: { type: object, nullable: true }
+    SuccessEnvelope:
+      type: object
+      required: [success, data, error]
+      properties:
+        success: { type: boolean }
+        data: { type: object, nullable: true }
+        error: { type: object, nullable: true }
+    ErrorEnvelope:
+      type: object
+      required: [success, data, error]
+      properties:
+        success: { type: boolean, enum: [false] }
+        data: { type: object, nullable: true }
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum:
+                - VALIDATION_ERROR
+                - INVALID_JSON
+                - UNSUPPORTED_MEDIA_TYPE
+                - PAYLOAD_TOO_LARGE
+                - PROXY_AUTH_FAILED
+                - MISSING_APP_CREDENTIALS
+                - INVALID_APP_CREDENTIALS
+                - APP_ACCESS_DENIED
+                - INVALID_CREDENTIALS
+                - EMAIL_ALREADY_REGISTERED
+                - MISSING_ACCESS_TOKEN
+                - INVALID_TOKEN
+                - TOKEN_EXPIRED
+                - SESSION_REVOKED
+                - INVALID_REFRESH_TOKEN
+                - REFRESH_TOKEN_EXPIRED
+                - REFRESH_TOKEN_REUSED
+                - INVALID_ONE_TIME_TOKEN
+                - FEATURE_NOT_CONFIGURED
+                - RATE_LIMITED
+                - NOT_FOUND
+                - INTEGRATION_ERROR
+                - INTEGRATION_TIMEOUT
+                - SERVICE_UNAVAILABLE
+                - INTERNAL_ERROR
+            message: { type: string }
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  path: { type: string }
+                  message: { type: string }
+  responses:
+    Accepted:
+      description: Request accepted (identical response whether or not the email exists)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/SuccessEnvelope" }
+          example: { success: true, data: { accepted: true }, error: null }
+    BadRequest:
+      description: VALIDATION_ERROR, INVALID_JSON or INVALID_ONE_TIME_TOKEN
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          example:
+            success: false
+            data: null
+            error:
+              code: VALIDATION_ERROR
+              message: The request body is invalid.
+              details: [{ path: email, message: email must be a valid email address }]
+    Unauthorized:
+      description: Missing/invalid application credentials or access token
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          example: { success: false, data: null, error: { code: INVALID_APP_CREDENTIALS, message: Invalid application credentials. } }
+    Forbidden:
+      description: PROXY_AUTH_FAILED or APP_ACCESS_DENIED
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    TooLarge:
+      description: Body larger than 16 KiB
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    UnsupportedMediaType:
+      description: Content-Type must be application/json
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    RateLimited:
+      description: Too many requests
+      headers:
+        Retry-After:
+          schema: { type: integer }
+          description: Seconds until the limit resets
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          example: { success: false, data: null, error: { code: RATE_LIMITED, message: Too many requests. Please try again later. } }
+    NotConfigured:
+      description: Email webhook not configured for this application
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          example: { success: false, data: null, error: { code: FEATURE_NOT_CONFIGURED, message: This feature is not configured for the application. } }
+    IntegrationError:
+      description: Your backend failed or violated the integration contract
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    IntegrationTimeout:
+      description: Your backend did not respond in time
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    Unavailable:
+      description: Database or rate limiter unavailable
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }

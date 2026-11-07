@@ -1,0 +1,98 @@
+// Prisma schema for the Authentication API.
+// We store ONLY authentication/session state. User records live in the
+// developer's own database and are reached through the integration contract.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+/// A developer application = an isolated authentication namespace.
+/// Provisioned with `npm run apps -- create ...` (there is no public endpoint).
+model Application {
+  /// Public application identifier, e.g. "app_3f9c1e...". Sent as X-App-Id.
+  id                       String   @id
+  name                     String
+  /// SHA-256 of the application secret. The plaintext secret is shown once at provisioning.
+  secretHash               String   @map("secret_hash")
+  /// Developer backend endpoint implementing the integration contract (HTTPS, public host).
+  backendUrl               String   @map("backend_url")
+  /// Optional developer endpoint that delivers emails (verification / password reset).
+  emailWebhookUrl          String?  @map("email_webhook_url")
+  /// Optional binding to a RapidAPI user (X-RapidAPI-User). When set, other RapidAPI users cannot use this app.
+  rapidApiUser             String?  @map("rapidapi_user")
+  /// Bumping this rotates the app's JWT signing key (invalidates all access tokens of the app).
+  jwtKeyVersion            Int      @default(1) @map("jwt_key_version")
+  /// Bumping this rotates the secret used to sign requests sent to the developer backend.
+  integrationSecretVersion Int      @default(1) @map("integration_secret_version")
+  isActive                 Boolean  @default(true) @map("is_active")
+  createdAt                DateTime @default(now()) @map("created_at")
+  updatedAt                DateTime @updatedAt @map("updated_at")
+
+  sessions      Session[]
+  oneTimeTokens OneTimeToken[]
+
+  @@map("applications")
+}
+
+/// One login = one session = one refresh-token family.
+model Session {
+  id            String    @id @default(uuid()) @db.Uuid
+  appId         String    @map("app_id")
+  /// User identifier issued by the developer backend.
+  userId        String    @map("user_id")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  lastUsedAt    DateTime  @default(now()) @map("last_used_at")
+  expiresAt     DateTime  @map("expires_at")
+  revokedAt     DateTime? @map("revoked_at")
+  revokedReason String?   @map("revoked_reason")
+
+  app           Application    @relation(fields: [appId], references: [id], onDelete: Cascade)
+  refreshTokens RefreshToken[]
+
+  @@index([appId, userId])
+  @@map("sessions")
+}
+
+/// Refresh tokens are stored ONLY as SHA-256 hashes. Each token is single-use (rotation).
+model RefreshToken {
+  id        String    @id @default(uuid()) @db.Uuid
+  sessionId String    @map("session_id") @db.Uuid
+  tokenHash String    @unique @map("token_hash")
+  createdAt DateTime  @default(now()) @map("created_at")
+  expiresAt DateTime  @map("expires_at")
+  /// Set when the token was exchanged. A second use = reuse => the whole session is revoked.
+  usedAt    DateTime? @map("used_at")
+
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@map("refresh_tokens")
+}
+
+enum OneTimeTokenPurpose {
+  EMAIL_VERIFICATION
+  PASSWORD_RESET
+}
+
+/// Single-use, expiring tokens for email verification and password reset (hash only).
+model OneTimeToken {
+  id        String              @id @default(uuid()) @db.Uuid
+  appId     String              @map("app_id")
+  userId    String              @map("user_id")
+  email     String
+  purpose   OneTimeTokenPurpose
+  tokenHash String              @unique @map("token_hash")
+  createdAt DateTime            @default(now()) @map("created_at")
+  expiresAt DateTime            @map("expires_at")
+  usedAt    DateTime?           @map("used_at")
+
+  app Application @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@index([appId, userId, purpose])
+  @@map("one_time_tokens")
+}
